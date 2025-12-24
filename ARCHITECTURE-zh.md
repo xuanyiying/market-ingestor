@@ -1,110 +1,119 @@
-# Market Ingestor - 技术架构与设计文档
+# Quant-Trader - 技术架构与引擎设计
 
-本文档详细介绍了 `quant-trader` 模块的架构设计、职责拆分、核心流程以及开发指南，旨在帮助开发者理解项目结构并遵循最佳实践进行后续开发。
+本文档提供 `quant-trader` 架构的技术深度概览，涵盖其核心处理流水线以及商业级特性的集成设计。
 
-## 1. 项目架构图 (Architecture Diagram)
+## 1. 系统拓扑
+
+`quant-trader` 采用 **模块化单体 (Modular Monolith)** 模式及 **事件驱动核心 (Event-Driven Core)**，在保持部署简便性的同时，实现了高性能的数据处理。
 
 ```mermaid
 graph TD
-    subgraph "External Exchanges"
-        Binance[Binance WS]
-        OKX[OKX WS]
-        Bybit[Bybit WS]
-        Coinbase[Coinbase WS]
+    subgraph "接入层 (Ingestion)"
+        BC[Binance 接入器]
+        OC[OKX 接入器]
+        Norm[符号归一化器]
     end
 
-    subgraph "Market Ingestor (Go)"
-        subgraph "Ingestion Layer"
-            Connectors[Exchange Connectors]
-            Norm[Symbol Normalization]
-        end
-
-        subgraph "Messaging Layer (NATS)"
-            RawTopic[market.raw.*.*]
-            KlineTopic[market.kline.1m.*]
-        end
-
-        subgraph "Processing Layer"
-            KP[Kline Processor]
-            PS[Persistence Service]
-        end
-
-        subgraph "API & Push Layer"
-            Web[Gin Web Server]
-            WS[Push Gateway WebSocket]
-            API[RESTful API]
-        end
+    subgraph "消息中间件 (NATS JetStream)"
+        RawT[market.raw.*]
+        KlineT[market.kline.*]
     end
 
-    subgraph "Persistence Layer"
+    subgraph "核心处理单元"
+        KP[K线处理器]
+        AE[预警引擎]
+        PE[模拟引擎]
+        AS[分析服务]
+    end
+
+    subgraph "执行与风控"
+        RM[风控管理器]
+        WR[Wasm 运行器]
+    end
+
+    subgraph "持久化与接口"
+        Batch[批量保存器]
         TSDB[(TimescaleDB)]
+        HTTP[Gin REST API]
+        Pay[Stripe 支付服务]
     end
 
-    subgraph "Frontend"
-        Vue[Vue + ECharts Monitor]
-    end
-
-    %% Flow
-    Binance & OKX & Bybit & Coinbase --> Connectors
-    Connectors --> Norm
-    Norm --> RawTopic
-    RawTopic --> KP & PS
-    KP --> KlineTopic
-    KlineTopic --> PS & WS
-    PS --> TSDB
-    API --> TSDB
-    WS & API --> Vue
+    BC & OC --> Norm
+    Norm --> RawT
+    RawT --> KP & AE
+    KP --> KlineT
+    KlineT --> Batch & PE & AS
+    Batch --> TSDB
+    PE --> RM
+    RM --> WR
+    HTTP --> Pay & PE & AS
 ```
 
-## 2. 模块功能说明 (Module Descriptions)
+## 2. 组件职责
 
-### 2.1 核心组件
+### 2.1 接入与归一化 (`internal/connector`)
 
-- **`internal/app`**: 应用生命周期管理器。负责所有组件的初始化（DB, NATS, HTTP Server）和优雅停机。遵循 **职责单一原则 (SRP)**。
-- **`api/`**: 外部 HTTP 接口层。包含 RESTful 处理函数 (`handler.go`) 和认证中间件 (`middleware.go`)。
-- **`internal/connector/`**: 交易所适配器。每个交易所都有独立的实现，负责维护 WebSocket 连接、重连机制和原始数据解析。
-- **`internal/processor/`**: 流式处理器。核心是 `KlineProcessor`，它订阅原始成交数据 (`market.raw`) 并聚合生成 1 分钟 K 线。
-- **`internal/storage/`**: 持久化层。使用批量插入 (Batch Insert) 优化写入性能，支持 `Trade` 和 `KLine` 的存储。
-- **`internal/push/`**: 实时推送网关。基于 NATS 订阅和 WebSocket，实现高效的消息广播。
+- **接入器 (Connectors)**: 维护交易所的 WebSocket 连接池。实现心跳检测和指数退避重连机制。
+- **归一化器 (Normalizer)**: 在进入 NATS 总线前，将交易所特有的交易对符号（如 `BTC-USDT`）转换为统一的 `BTCUSDT` 标准。
 
-## 3. 关键设计决策 (Key Design Decisions)
+### 2.2 处理中枢 (`internal/processor`)
 
-### 3.1 职责拆分与解耦
+- **K线处理器 (KlineProcessor)**: 使用内存滑动窗口将原始成交聚合为多个时间周期（1m, 5m, 1h 等）。
+- **预警引擎 (AlertEngine)**: 实时评估技术指标和价格规则，触发预警通知。
 
-项目从原先臃肿的 `main.go` 重构为模块化的 `internal/app` 结构：
+### 2.3 交易模拟 (`internal/paper`)
 
-- **`main.go`**: 仅作为入口，负责启动 `app.App`。
-- **依赖注入**: `App` 结构体持有所有核心依赖（DB, Logger, NATS），通过显式传递而非全局变量进行交互，提高了代码的可测试性。
+- **模拟引擎 (PaperEngine)**: 提供高并发订单撮合。维护虚拟余额，并根据通过 NATS 分发的实时市场成交数据执行订单。
 
-### 3.2 消息驱动架构 (EDA)
+### 2.4 风控与策略执行 (`internal/risk`, `internal/strategy`)
 
-使用 **NATS JetStream** 作为消息总线：
+- **风控管理器 (RiskManager)**: 在订单执行前进行拦截，校验全局及用户级的风控限制（如最大持仓、最大单日亏损）。
+- **Wasm 运行器 (WasmRunner)**: 在隔离的 WebAssembly 沙箱中执行交易策略，确保自定义逻辑不会危及系统稳定性。
 
-- **解耦**: 数据采集 (Ingestion) 与数据处理 (Processing/Storage) 完全解耦。
-- **可靠性**: 利用 JetStream 的持久化特性，确保在处理服务重启时不会丢失市场数据。
+### 2.5 分析与数据 (`internal/analytics`, `internal/storage`)
 
-### 3.3 数据归一化 (Symbol Normalization)
+- **分析服务 (AnalyticsService)**: 基于 TimescaleDB 中存储的历史表现数据，计算高级指标（夏普比率、胜率、最大回撤）。
+- **批量保存器 (BatchSaver)**: 高吞吐量持久化层，将进入的 NATS 消息打包为 SQL COPY 操作或批量 INSERT。
 
-各交易所的交易对命名格式不一（如 `BTC-USDT`, `btcusdt`, `XBT/USD`）。系统在进入消息总线前会进行强制归一化为 `BTCUSDT` 格式，确保下游处理逻辑的一致性。
+## 3. 核心设计决策
 
-## 4. 学习指南 (Learning Guide)
+### 3.1 事件驱动解耦
 
-### 4.1 如何添加一个新的交易所？
+通过使用 **NATS JetStream**，我们将接入层与处理层完全解耦。这确保了即使持久化层负载过高，行情数据仍能无延迟地流向实时模拟引擎。
 
-1. 在 `internal/connector/` 下创建新的实现文件。
-2. 实现 `Run(ctx context.Context, tradeChan chan<- model.Trade)` 方法。
-3. 在 `internal/app/worker.go` 的 `startIngestionWorker` 方法中添加该交易所的配置。
+### 3.2 时序数据优化
 
-### 4.2 核心调用关系流程
+使用 **TimescaleDB** 超表 (Hypertables) 存储行情数据，优势包括：
 
-1. **启动**: `main.go` -> `app.NewApp()` -> `app.Init()` -> `app.Run()`。
-2. **采集**: `connector.Run()` -> 原始数据解析 -> `tradeChan`。
-3. **发布**: `app.startIngestionWorker` 消费 `tradeChan` -> 归一化 Symbol -> NATS `market.raw`。
-4. **聚合**: `KlineProcessor` 订阅 `market.raw` -> 内存聚合 -> 每 5s 刷新并发布到 NATS `market.kline`。
-5. **持久化**: `PersistenceService` 订阅 `market.raw` 和 `market.kline` -> 批量写入 TimescaleDB。
+- **高效压缩**: 降低历史 Tick 数据的存储成本。
+- **数据留存**: 通过留存策略自动删除过期数据。
 
-## 5. 开发规范
+### 3.3 基于隔离的安全设计 (WASM)
 
-- **错误处理**: 所有的初始化方法必须返回 `error`，并在 `main.go` 中进行致命错误处理。
-- **日志**: 使用 `zap` 结构化日志，避免使用 `fmt.Println`。
-- **并发**: 所有的长驻任务（如 Connector, Processor）必须支持 `context.Context` 以便优雅停机。
+交易策略不直接在 Go 进程中运行，而是通过 **WebAssembly (wazero)** 执行：
+
+- **故障隔离**: 崩溃的策略不会导致整个交易引擎宕机。
+- **资源限制**: 为每个策略实例配置可控的内存和 CPU 配额。
+
+## 4. 业务流程
+
+### 4.1 交易执行流
+
+1. **API 调用**: 用户提交模拟订单。
+2. **风控检查**: `RiskManager` 验证订单合法性。
+3. **引擎准入**: 订单加入 `PaperEngine` 待撮合列表。
+4. **撮合匹配**: 当新的成交消息通过 NATS 到达时，`PaperEngine` 检查成交条件。
+5. **结算完成**: 更新并持久化账户持仓与余额。
+
+### 4.2 技术指标流水线
+
+1. **原始成交**: 从交易所实时到达。
+2. **K线构建**: `KlineProcessor` 更新当前 K 线状态。
+3. **指标计算**: `Indicator` 库更新 RSI/MACD 等数值。
+4. **预警触发**: 若符合预设规则，`AlertEngine` 发出通知。
+
+## 5. 开发标准
+
+- **Internal 包隔离**: 核心逻辑封装在 `internal/` 下，防止外部模块绕过标准接口。
+- **Context 感知**: 所有长运行服务均遵循 `context.Context`，确保优雅停机。
+- **结构化日志**: 全局使用 `zap` 日志，通过 Field 机制方便日志聚合与分析。

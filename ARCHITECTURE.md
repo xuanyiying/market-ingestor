@@ -1,110 +1,119 @@
-# Market Ingestor - Technical Architecture & Design
+# Quant-Trader - Technical Architecture & Engine Design
 
-This document provides a detailed overview of the `quant-trader` module's architectural design, responsibility split, core flows, and developer guides.
+This document provides a detailed technical overview of the `quant-trader` architecture, its core processing pipelines, and the integration of commercial-grade features.
 
-## 1. Architecture Diagram
+## 1. System Topology
+
+`quant-trader` follows a **Modular Monolith** pattern with an **Event-Driven Core**, allowing for high-performance data processing while maintaining ease of deployment.
 
 ```mermaid
 graph TD
-    subgraph "External Exchanges"
-        Binance[Binance WS]
-        OKX[OKX WS]
-        Bybit[Bybit WS]
-        Coinbase[Coinbase WS]
+    subgraph "Ingestion Layer"
+        BC[Binance Connector]
+        OC[OKX Connector]
+        Norm[Symbol Normalizer]
     end
 
-    subgraph "Market Ingestor (Go)"
-        subgraph "Ingestion Layer"
-            Connectors[Exchange Connectors]
-            Norm[Symbol Normalization]
-        end
-
-        subgraph "Messaging Layer (NATS)"
-            RawTopic[market.raw.*.*]
-            KlineTopic[market.kline.1m.*]
-        end
-
-        subgraph "Processing Layer"
-            KP[Kline Processor]
-            PS[Persistence Service]
-        end
-
-        subgraph "API & Push Layer"
-            Web[Gin Web Server]
-            WS[Push Gateway WebSocket]
-            API[RESTful API]
-        end
+    subgraph "Messaging Layer (NATS JetStream)"
+        RawT[market.raw.*]
+        KlineT[market.kline.*]
     end
 
-    subgraph "Persistence Layer"
+    subgraph "Processing Core"
+        KP[Kline Processor]
+        AE[Alert Engine]
+        PE[Paper Engine]
+        AS[Analytics Service]
+    end
+
+    subgraph "Execution Layer"
+        RM[Risk Manager]
+        WR[Wasm Runner]
+    end
+
+    subgraph "Persistence & API"
+        Batch[Batch Saver]
         TSDB[(TimescaleDB)]
+        HTTP[Gin REST API]
+        Pay[Stripe Service]
     end
 
-    subgraph "Frontend"
-        Vue[Vue + ECharts Monitor]
-    end
-
-    %% Flow
-    Binance & OKX & Bybit & Coinbase --> Connectors
-    Connectors --> Norm
-    Norm --> RawTopic
-    RawTopic --> KP & PS
-    KP --> KlineTopic
-    KlineTopic --> PS & WS
-    PS --> TSDB
-    API --> TSDB
-    WS & API --> Vue
+    BC & OC --> Norm
+    Norm --> RawT
+    RawT --> KP & AE
+    KP --> KlineT
+    KlineT --> Batch & PE & AS
+    Batch --> TSDB
+    PE --> RM
+    RM --> WR
+    HTTP --> Pay & PE & AS
 ```
 
-## 2. Module Descriptions
+## 2. Component Responsibility
 
-### 2.1 Core Components
+### 2.1 Ingestion & Normalization (`internal/connector`)
 
-- **`internal/app`**: Application lifecycle manager. Responsible for initializing all components (DB, NATS, HTTP Server) and graceful shutdown. Follows the **Single Responsibility Principle (SRP)**.
-- **`api/`**: External HTTP interface layer. Contains RESTful handlers (`handler.go`) and authentication middleware (`middleware.go`).
-- **`internal/connector/`**: Exchange adapters. Each exchange has an independent implementation responsible for maintaining WebSocket connections, reconnection mechanisms, and raw data parsing.
-- **`internal/processor/`**: Stream processors. The core is `KlineProcessor`, which subscribes to raw trade data (`market.raw`) and aggregates it into 1-minute K-lines.
-- **`internal/storage/`**: Persistence layer. Uses Batch Insert to optimize write performance, supporting storage for both `Trade` and `KLine`.
-- **`internal/push/`**: Real-time push gateway. Based on NATS subscriptions and WebSocket for efficient message broadcasting.
+- **Connectors**: Maintain WebSocket pools with exchanges. Implement heartbeat checks and exponential backoff reconnection.
+- **Normalizer**: Converts exchange-specific symbols (e.g., `BTC-USDT`) to a unified `BTCUSDT` standard before entering the NATS bus.
+
+### 2.2 Processing Hub (`internal/processor`)
+
+- **KlineProcessor**: Aggregates raw trades into multiple timeframes (1m, 5m, 1h, etc.) using an in-memory sliding window.
+- **AlertEngine**: Evaluates technical indicators and price rules in real-time.
+
+### 2.3 Trading Simulation (`internal/paper`)
+
+- **PaperEngine**: Provides high-concurrency order matching. It maintains virtual balances and executes orders against the live market feed distributed via NATS.
+
+### 2.4 Risk & Execution (`internal/risk`, `internal/strategy`)
+
+- **RiskManager**: Intercepts orders before execution to validate against global and per-user risk limits (e.g., max position size, max daily loss).
+- **WasmRunner**: Executes trading strategies in an isolated WebAssembly sandbox, ensuring that custom logic cannot compromise system stability.
+
+### 2.5 Analytics & Data (`internal/analytics`, `internal/storage`)
+
+- **AnalyticsService**: Calculates high-level metrics (Sharpe Ratio, Win Rate, Max Drawdown) based on historical performance stored in TimescaleDB.
+- **BatchSaver**: High-throughput persistence layer that batches incoming NATS messages into SQL COPY operations or batched INSERTs.
 
 ## 3. Key Design Decisions
 
-### 3.1 Responsibility Split & Decoupling
+### 3.1 Event-Driven Decoupling
 
-The project was refactored from a bulky `main.go` into a modular `internal/app` structure:
+By using **NATS JetStream**, we decouple the ingestors from the processors. This ensures that even if the persistence layer is under heavy load, market data continues to flow to the real-time simulation engine without delay.
 
-- **`main.go`**: Acts only as an entry point, responsible for starting `app.App`.
-- **Dependency Injection**: The `App` struct holds all core dependencies (DB, Logger, NATS), interacting through explicit passing rather than global variables, which improves testability.
+### 3.2 Time-Series Optimization
 
-### 3.2 Event-Driven Architecture (EDA)
+**TimescaleDB** hypertables are used for storing market data. This allows for:
 
-Uses **NATS JetStream** as the message bus:
+- **Efficient Compression**: Reducing storage costs for historical tick data.
+- **Data Retention**: Automated deletion of old data using retention policies.
 
-- **Decoupling**: Data ingestion is completely decoupled from processing and storage.
-- **Reliability**: Leverages JetStream's persistence to ensure no market data is lost when processing services restart.
+### 3.3 Security through Isolation (WASM)
 
-### 3.3 Symbol Normalization
+Instead of running strategies directly in the Go process, we use **WebAssembly (via wazero)**. This provides:
 
-Exchanges use different naming formats (e.g., `BTC-USDT`, `btcusdt`, `XBT/USD`). The system normalizes these to `BTCUSDT` before entering the message bus to ensure consistency in downstream logic.
+- **Fault Isolation**: A crashing strategy won't crash the entire trading engine.
+- **Resource Limits**: Configurable memory and CPU quotas for each strategy instance.
 
-## 4. Learning Guide
+## 4. Operational Flows
 
-### 4.1 How to add a new exchange?
+### 4.1 Trade Execution Flow
 
-1. Create a new implementation file in `internal/connector/`.
-2. Implement the `Run(ctx context.Context, tradeChan chan<- model.Trade)` method.
-3. Register the exchange configuration in the `startIngestionWorker` method of `internal/app/worker.go`.
+1. **API Call**: User submits a paper order.
+2. **Risk Check**: `RiskManager` validates the order.
+3. **Engine Entry**: Order is added to the `PaperEngine` pending list.
+4. **Matching**: When a new trade message arrives via NATS, `PaperEngine` checks for fills.
+5. **Completion**: Portfolio balance is updated and persisted.
 
-### 4.2 Core Call Flow
+### 4.2 Technical Indicator Pipeline
 
-1. **Startup**: `main.go` -> `app.NewApp()` -> `app.Init()` -> `app.Run()`.
-2. **Ingestion**: `connector.Run()` -> raw data parsing -> `tradeChan`.
-3. **Publishing**: `app.startIngestionWorker` consumes `tradeChan` -> Symbol normalization -> NATS `market.raw`.
-4. **Aggregation**: `KlineProcessor` subscribes to `market.raw` -> in-memory aggregation -> flushes and publishes to NATS `market.kline` every 5s.
-5. **Persistence**: `PersistenceService` subscribes to `market.raw` and `market.kline` -> batch writes to TimescaleDB.
+1. **Raw Trade**: Arrives from exchange.
+2. **K-Line Build**: `KlineProcessor` updates the current candle.
+3. **Indicator Calculation**: `Indicator library` updates RSI/MACD values.
+4. **Alert Check**: `AlertEngine` triggers if rules are met.
 
-## 5. Development Standards
+## 5. Coding Standards
 
-- **Error Handling**: All initialization methods must return an `error`, which is handled as a fatal error in `main.go`.
-- **Logging**: Use `zap` structured logging; avoid `fmt.Println`.
-- **Concurrency**: All long-running tasks (e.g., Connector, Processor) must support `context.Context` for graceful shutdown.
+- **Internal Package**: All core logic is hidden in `internal/` to prevent external modules from bypassing defined APIs.
+- **Context-Aware**: Every long-running service respects `context.Context` for proper cancellation and graceful shutdown.
+- **Structured Logging**: `zap` is used throughout the system with fields to allow for easy log aggregation and analysis.
