@@ -10,14 +10,17 @@ import (
 	"time"
 
 	"market-ingestor/api"
+	"market-ingestor/api/middleware"
+	"market-ingestor/internal/alert"
 	"market-ingestor/internal/config"
 	"market-ingestor/internal/infrastructure"
+	"market-ingestor/internal/paper"
 	"market-ingestor/internal/processor"
 	"market-ingestor/internal/push"
 	"market-ingestor/internal/storage"
 
 	"github.com/gin-gonic/gin"
-	"github.com/jackc/pgx/v4/pgxpool"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
@@ -25,13 +28,15 @@ import (
 
 // App defines the application structure and its dependencies
 type App struct {
-	Config      *config.Config
-	Logger      *zap.Logger
-	DB          *pgxpool.Pool
-	NC          *nats.Conn
-	JS          nats.JetStreamContext
-	PushGateway *push.PushGateway
-	HTTPServer  *http.Server
+	Config       *config.Config
+	Logger       *zap.Logger
+	DB           *pgxpool.Pool
+	NC           *nats.Conn
+	JS           nats.JetStreamContext
+	PushGateway  *push.PushGateway
+	AlertService *alert.AlertService
+	PaperEngine  *paper.PaperEngine
+	HTTPServer   *http.Server
 }
 
 // NewApp creates a new application instance
@@ -53,7 +58,7 @@ func NewApp() (*App, error) {
 // Init initializes all application components
 func (a *App) Init(ctx context.Context) error {
 	// 1. Database
-	dbPool, err := pgxpool.Connect(ctx, a.Config.DB_DSN)
+	dbPool, err := pgxpool.New(ctx, a.Config.DB_DSN)
 	if err != nil {
 		return fmt.Errorf("failed to connect to database: %w", err)
 	}
@@ -73,6 +78,8 @@ func (a *App) Init(ctx context.Context) error {
 
 	// 3. Services
 	a.PushGateway = push.NewPushGateway(js, a.Logger)
+	a.AlertService = alert.NewAlertService(a.DB, js, a.Logger)
+	a.PaperEngine = paper.NewPaperEngine(a.DB, js, a.Logger)
 
 	return nil
 }
@@ -90,8 +97,21 @@ func (a *App) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to start kline processor: %w", err)
 	}
 
+	// Start Alert Service
+	if err := a.AlertService.Start(ctx); err != nil {
+		a.Logger.Error("failed to start alert service", zap.Error(err))
+	}
+
+	// Start Paper Engine
+	if err := a.PaperEngine.Start(ctx); err != nil {
+		a.Logger.Error("failed to start paper engine", zap.Error(err))
+	}
+
 	// Start Ingestion Worker
 	a.startIngestionWorker(ctx)
+
+	// Start Strategy Runner
+	a.startStrategyRunner(ctx)
 
 	// Setup HTTP Server
 	a.HTTPServer = &http.Server{
@@ -165,13 +185,37 @@ func (a *App) setupRouter() *gin.Engine {
 		v1.GET("/klines/:symbol", apiHandler.GetHistoryKLines)
 	}
 
-	r.StaticFile("/", "./static/index.html")
-	r.Static("/static", "./static")
-
 	protected := r.Group("/api/v1")
-	protected.Use(api.AuthMiddleware())
+	protected.Use(middleware.AuthMiddleware())
+	protected.Use(middleware.SubscriptionMiddleware(a.DB)) // Apply subscription limits
+	protected.Use(middleware.RateLimitMiddleware())        // Apply rate limiting
 	{
 		protected.POST("/backtest", apiHandler.RunBacktest)
+		protected.POST("/backfill", apiHandler.TriggerBackfill)
+
+		// Alert management
+		protected.GET("/alerts", apiHandler.GetAlerts)
+		protected.POST("/alerts", apiHandler.CreateAlert)
+		protected.DELETE("/alerts/:id", apiHandler.DeleteAlert)
+
+		// Subscription info
+		protected.GET("/subscription", apiHandler.GetSubscription)
+
+		// Paper Trading
+		protected.GET("/paper/account", apiHandler.GetPaperAccount)
+		protected.POST("/paper/orders", apiHandler.CreatePaperOrder)
+		protected.GET("/paper/positions", apiHandler.GetPaperPositions)
+
+		// Portfolios
+		protected.GET("/portfolios", apiHandler.GetPortfolios)
+		protected.POST("/portfolios", apiHandler.CreatePortfolio)
+
+		// Marketplace
+		protected.GET("/market/strategies", apiHandler.ListMarketStrategies)
+		protected.POST("/market/strategies/:id/purchase", apiHandler.PurchaseStrategy)
+
+		// Analytics
+		protected.GET("/analytics/portfolio", apiHandler.GetPortfolioReport)
 	}
 
 	r.GET("/ws", func(c *gin.Context) {

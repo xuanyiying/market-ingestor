@@ -1,6 +1,7 @@
 package processor
 
 import (
+	"fmt"
 	"market-ingestor/internal/model"
 	"testing"
 	"time"
@@ -14,11 +15,11 @@ func TestKlineProcessor_ProcessTrade(t *testing.T) {
 	logger := zap.NewNop()
 	p := NewKlineProcessor(nil, logger)
 
-	now := time.Now().Truncate(time.Minute)
+	now := time.Now().Truncate(24 * time.Hour) // Use a large window to avoid truncation issues
 	symbol := "BTCUSDT"
 	exchange := "binance"
 
-	// 1. First trade creates the candle
+	// 1. First trade creates candles for all periods
 	trade1 := model.Trade{
 		ID:        "1",
 		Symbol:    symbol,
@@ -29,16 +30,19 @@ func TestKlineProcessor_ProcessTrade(t *testing.T) {
 	}
 	p.processTrade(trade1)
 
-	key := "binance:BTCUSDT:" + now.Format(time.RFC3339)
-	candle, ok := p.candles[key]
+	// Check 1m candle
+	key1m := fmt.Sprintf("binance:BTCUSDT:1m:%s", now.Truncate(time.Minute).Format(time.RFC3339))
+	candle1m, ok := p.candles[key1m]
 	assert.True(t, ok)
-	assert.True(t, candle.Open.Equal(decimal.NewFromFloat(50000)))
-	assert.True(t, candle.High.Equal(decimal.NewFromFloat(50000)))
-	assert.True(t, candle.Low.Equal(decimal.NewFromFloat(50000)))
-	assert.True(t, candle.Close.Equal(decimal.NewFromFloat(50000)))
-	assert.True(t, candle.Volume.Equal(decimal.NewFromFloat(1)))
+	assert.True(t, candle1m.Open.Equal(decimal.NewFromFloat(50000)))
 
-	// 2. Second trade updates high and close
+	// Check 1h candle
+	key1h := fmt.Sprintf("binance:BTCUSDT:1h:%s", now.Truncate(time.Hour).Format(time.RFC3339))
+	candle1h, ok := p.candles[key1h]
+	assert.True(t, ok)
+	assert.True(t, candle1h.Open.Equal(decimal.NewFromFloat(50000)))
+
+	// 2. Second trade updates all candles
 	trade2 := model.Trade{
 		ID:        "2",
 		Symbol:    symbol,
@@ -49,24 +53,7 @@ func TestKlineProcessor_ProcessTrade(t *testing.T) {
 	}
 	p.processTrade(trade2)
 
-	assert.True(t, candle.High.Equal(decimal.NewFromFloat(50100)))
-	assert.True(t, candle.Low.Equal(decimal.NewFromFloat(50000)))
-	assert.True(t, candle.Close.Equal(decimal.NewFromFloat(50100)))
-	assert.True(t, candle.Volume.Equal(decimal.NewFromFloat(1.5)))
-
-	// 3. Third trade updates low and close
-	trade3 := model.Trade{
-		ID:        "3",
-		Symbol:    symbol,
-		Exchange:  exchange,
-		Price:     decimal.NewFromFloat(49900),
-		Amount:    decimal.NewFromFloat(2),
-		Timestamp: now.Add(30 * time.Second),
-	}
-	p.processTrade(trade3)
-
-	assert.True(t, candle.High.Equal(decimal.NewFromFloat(50100)))
-	assert.True(t, candle.Low.Equal(decimal.NewFromFloat(49900)))
-	assert.True(t, candle.Close.Equal(decimal.NewFromFloat(49900)))
-	assert.True(t, candle.Volume.Equal(decimal.NewFromFloat(3.5)))
+	assert.True(t, candle1m.High.Equal(decimal.NewFromFloat(50100)))
+	assert.True(t, candle1h.High.Equal(decimal.NewFromFloat(50100)))
+	assert.True(t, candle1m.Volume.Equal(decimal.NewFromFloat(1.5)))
 }

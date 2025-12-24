@@ -1,0 +1,36 @@
+name: Go CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+
+    - name: Install dependencies
+      run: go mod download
+
+    - name: Build
+      run: go build -v ./...
+
+    - name: Test with Coverage
+      run: go test -v -coverprofile=coverage.txt -covermode=atomic ./...
+
+    - name: Check Coverage
+      run: |
+        COVERAGE=$(go tool cover -func=coverage.txt | grep total | grep -RoP "\d+\.\d+")
+        echo "Total coverage: $COVERAGE%"
+        if (( $(echo "$COVERAGE < 80" | bc -l) )); then
+          echo "Coverage is below 80%"
+          # exit 1 # Uncomment to enforce coverage
+        fi

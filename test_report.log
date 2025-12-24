@@ -1,0 +1,50 @@
+?   	market-ingestor/api	[no test files]
+?   	market-ingestor/cmd	[no test files]
+=== RUN   TestNormalizeSymbol
+=== RUN   TestNormalizeSymbol/BTC-USDT
+=== RUN   TestNormalizeSymbol/btcusdt
+=== RUN   TestNormalizeSymbol/BTC/USDT
+=== RUN   TestNormalizeSymbol/ETH_USDT
+=== RUN   TestNormalizeSymbol/XBT/USD
+--- PASS: TestNormalizeSymbol (0.00s)
+    --- PASS: TestNormalizeSymbol/BTC-USDT (0.00s)
+    --- PASS: TestNormalizeSymbol/btcusdt (0.00s)
+    --- PASS: TestNormalizeSymbol/BTC/USDT (0.00s)
+    --- PASS: TestNormalizeSymbol/ETH_USDT (0.00s)
+    --- PASS: TestNormalizeSymbol/XBT/USD (0.00s)
+PASS
+ok  	market-ingestor/internal/app	8.115s
+?   	market-ingestor/internal/config	[no test files]
+=== RUN   TestBinanceConnector_ConvertToModel
+--- PASS: TestBinanceConnector_ConvertToModel (0.00s)
+=== RUN   TestOKXConnector_ConvertToModel
+--- PASS: TestOKXConnector_ConvertToModel (0.00s)
+=== RUN   TestBybitConnector_ConvertToModel
+--- PASS: TestBybitConnector_ConvertToModel (0.00s)
+=== RUN   TestKrakenConnector_ConvertToModel
+--- PASS: TestKrakenConnector_ConvertToModel (0.00s)
+=== RUN   TestCoinbaseConnector_ConvertToModel
+--- PASS: TestCoinbaseConnector_ConvertToModel (0.00s)
+PASS
+ok  	market-ingestor/internal/connector	6.714s
+=== RUN   TestBacktester
+    backtester_test.go:44: Backtest Report: {StrategyName:Moving Average Crossover TotalTrades:2 WinRate:1 TotalReturn:-0.0214585514435589 TotalProfit:9785.4144855644106051025221 MaxDrawdown:0.0378086090909091 SharpRatio:-0.19826432490147317 InitialBalance:10000 FinalBalance:9785.4144855644106018214543 TradesLog:[{Time:2025-12-24 00:54:26.158485 +0800 CST m=+240.002643624 Symbol:BTCUSDT Side:buy Price:108.054 Size:92.4538655673088457 Fee:9.9900099900099900132678 PnL:0} {Time:2025-12-24 00:57:26.158485 +0800 CST m=+420.002643624 Symbol:BTCUSDT Side:sell Price:105.947 Size:92.4538655673088457 Fee:9.7952096952596702753779 PnL:9785.4144855644106051025221}]}
+    backtester_test.go:46: Trade: buy BTCUSDT @ 108.054, Size: 92.4538655673088457
+    backtester_test.go:46: Trade: sell BTCUSDT @ 105.947, Size: 92.4538655673088457
+--- PASS: TestBacktester (0.00s)
+=== RUN   TestWorkerPool_SubmitAndProcess
+--- PASS: TestWorkerPool_SubmitAndProcess (0.10s)
+PASS
+ok  	market-ingestor/internal/engine	4.197s
+?   	market-ingestor/internal/infrastructure	[no test files]
+?   	market-ingestor/internal/model	[no test files]
+=== RUN   TestKlineProcessor_ProcessTrade
+--- PASS: TestKlineProcessor_ProcessTrade (0.00s)
+PASS
+ok  	market-ingestor/internal/processor	5.338s
+?   	market-ingestor/internal/push	[no test files]
+?   	market-ingestor/internal/storage	[no test files]
+=== RUN   TestMAStrategy_Logic
+--- PASS: TestMAStrategy_Logic (0.00s)
+PASS
+ok  	market-ingestor/internal/strategy	2.718s

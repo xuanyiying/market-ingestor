@@ -7,9 +7,11 @@ import (
 	"strings"
 
 	"market-ingestor/internal/connector"
+	"market-ingestor/internal/engine"
 	"market-ingestor/internal/infrastructure"
 	"market-ingestor/internal/model"
 	"market-ingestor/internal/storage"
+	"market-ingestor/internal/strategy"
 
 	"github.com/nats-io/nats.go"
 	"go.uber.org/zap"
@@ -113,5 +115,25 @@ func (a *App) startPersistenceService(tradeSaver *storage.BatchSaver, klineSaver
 	}, nats.Durable("kline_saver"), nats.ManualAck())
 	if err != nil {
 		a.Logger.Fatal("failed to subscribe to klines", zap.Error(err))
+	}
+}
+
+// startStrategyRunner initializes and starts the live strategy runner
+func (a *App) startStrategyRunner(ctx context.Context) {
+	runner := engine.NewStrategyRunner(a.JS, a.Logger)
+
+	// Add default strategy for testing
+	maCross, err := strategy.NewStrategy("ma_cross_v2", map[string]interface{}{
+		"short_period": float64(5),
+		"long_period":  float64(20),
+	})
+	if err != nil {
+		a.Logger.Error("failed to create strategy", zap.Error(err))
+		return
+	}
+	runner.AddStrategy(maCross)
+
+	if err := runner.Run(ctx); err != nil {
+		a.Logger.Error("failed to start strategy runner", zap.Error(err))
 	}
 }
