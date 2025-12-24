@@ -1,0 +1,41 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-background text-[#e0e0e0] m-0 p-0 font-sans antialiased;
+  }
+}
+
+@layer components {
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 4px;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    @apply bg-gray-800 rounded-full;
+  }
+
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    @apply bg-gray-700;
+  }
+}
+
+.up {
+  @apply text-up;
+}
+
+.down {
+  @apply text-down;
+}
+
+/* ECharts responsive container */
+.echarts-for-react {
+  width: 100% !important;
+  height: 100% !important;
+}
